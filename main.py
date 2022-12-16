@@ -17,13 +17,20 @@ from utils.time import sleep
 
 from screen_to_world import get_move_angle
 
-_aim_n_shoot = False
-_ret = None
+ACTIVATION_HOTKEY = 58  # CAPS-LOCK
+
+#config
+_shoot = True
 _show_cv2 = False
 
 # the bigger these values, the more accurate and fail-safe bot will behave
 _pause = 0.05
 _shoot_interval = 0.05  # seconds
+
+# used by the script
+_ret = None
+_aim = False
+
 
 def grab_process(q):
     grabber = Grabber()
@@ -39,7 +46,7 @@ def grab_process(q):
 
 
 def cv2_process(q):
-    global _aim_n_shoot, _ret, _pause, _shoot_interval, _show_cv2
+    global _aim, _shoot, _ret, _pause, _shoot_interval, _show_cv2
 
     fps = FPS()
     font = cv2.FONT_HERSHEY_SIMPLEX
@@ -58,6 +65,18 @@ def cv2_process(q):
 
     # 2420 = 53.13 grads
     # 360 grads = 16,400 # 16364
+
+    def check_dot(hue_point):
+        dot_img = grabber.get_image({"left": int(game_window_rect[0] + game_window_rect__center[0] + 5),
+                                     "top": int(
+                                         game_window_rect[1] + game_window_rect__center[1] + 28),
+                                     "width": 6,
+                                     "height": 6})
+        dot_img = cv2.cvtColor(dot_img, cv2.COLOR_BGR2HSV)
+        avg_color_per_row = np.average(dot_img, axis=0)
+        avg_color = np.average(avg_color_per_row, axis=0)
+
+        return (hue_point - 10 < avg_color[0] < hue_point + 20) and (avg_color[1] > 120) and (avg_color[2] > 100)
 
     while True:
         if not q.empty():
@@ -137,7 +156,7 @@ def cv2_process(q):
                 if _show_cv2:
                     cv2.circle(img, (mid_x, mid_y), 10, (0, 0, 255), -1)
 
-                if _aim_n_shoot:
+                if _aim:
                     if _last_shoot is None or time.perf_counter() > (_last_shoot + _shoot_interval):
                         rel_diff = get_move_angle((mid_x, mid_y), game_window_rect, x1, fov)
 
@@ -145,22 +164,17 @@ def cv2_process(q):
                         mouse.move_relative(int(rel_diff[0]), int(rel_diff[1]))
                         sleep(_pause)
 
-                        # detect if aiming the target (more accuracy)
-                        dot_img = grabber.get_image({"left": 1734 - 25, "top": 743 - 23, "width": 25, "height": 25})
-                        dot_img = cv2.cvtColor(dot_img, cv2.COLOR_BGR2HSV)
-                        avg_color_per_row = np.average(dot_img, axis=0)
-                        avg_color = np.average(avg_color_per_row, axis=0)
+                        if _shoot:
+                            # detect if aiming the target (more accurate)
+                            if check_dot(hue_point):
+                                # click
+                                mouse.hold_mouse()
+                                sleep(0.001)
+                                mouse.release_mouse()
+                                sleep(0.001)
 
-                        if (hue_point - 10 < avg_color[0] < hue_point + 20) \
-                                and (avg_color[1] > 120) and (avg_color[2] > 100):
-                            # click
-                            mouse.hold_mouse()
-                            sleep(0.001)
-                            mouse.release_mouse()
-                            sleep(0.001)
-
-                            _last_shoot = time.perf_counter()
-                            break
+                                _last_shoot = time.perf_counter()
+                                break
 
             # cv stuff
             # img = mask
@@ -175,14 +189,14 @@ def cv2_process(q):
 
 
 def switch_shoot_state(triggered, hotkey):
-    global _aim_n_shoot, _ret
-    _aim_n_shoot = not _aim_n_shoot  # inverse value
+    global _aim, _ret
+    _aim = not _aim  # inverse value
 
     if not _aim_n_shoot:
         _ret = None
 
 
-keyboard.add_hotkey(58, switch_shoot_state, args=('triggered', 'hotkey'))
+keyboard.add_hotkey(ACTIVATION_HOTKEY, switch_shoot_state, args=('triggered', 'hotkey'))
 
 if __name__ == "__main__":
 

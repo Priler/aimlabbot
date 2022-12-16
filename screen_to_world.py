@@ -1,3 +1,7 @@
+from math import atan, degrees, sqrt
+from utils.cv2 import point_get_difference
+
+
 def x_get_ratio(angle):
     if angle < 15:
         return 0.0201
@@ -40,6 +44,18 @@ def y_get_ratio(angle):
         return 0.022
     elif angle < 40:
         return 0.021
+
+
+def get_move_angle__new(aim_target, gwr, pixels_per_degree, fov, _r=False):
+    game_window_rect__center = (gwr[2]/2, gwr[3]/2)
+    rel_diff = list(point_get_difference(game_window_rect__center, aim_target))
+
+    x_degs = degrees(atan(rel_diff[0]/game_window_rect__center[0])) * ((fov[0]/2)/45)
+    y_degs = degrees(atan(rel_diff[1] / game_window_rect__center[0])) * ((fov[1]/2)/45)
+    rel_diff[0] = pixels_per_degree * x_degs
+    rel_diff[1] = pixels_per_degree * y_degs
+
+    return rel_diff, (x_degs+y_degs)
 
 
 def get_move_angle(aim_target, gwr, pixels_per_degree, fov):
