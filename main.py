@@ -17,26 +17,28 @@ from utils.time import sleep
 
 from screen_to_world import get_move_angle
 
-ACTIVATION_HOTKEY = 58  # CAPS-LOCK
-
 #config
+ACTIVATION_HOTKEY = 58  # 58 = CAPS-LOCK
+AUTO_DEACTIVATE_AFTER = 60  # seconds or None (default Aim Lab map time is 60 seconds)
 _shoot = True
-_show_cv2 = False
+_show_cv2 = True
 
 # the bigger these values, the more accurate and fail-safe bot will behave
 _pause = 0.05
 _shoot_interval = 0.05  # seconds
 
 # used by the script
+game_window_rect = WinHelper.GetWindowRect("aimlab_tb", (8, 30, 16, 39))  # cut the borders
 _ret = None
 _aim = False
+_activation_time = 0
 
 
 def grab_process(q):
     grabber = Grabber()
 
     while True:
-        img = grabber.get_image({"left": 760, "top": 191, "width": 1920, "height": 1080})
+        img = grabber.get_image({"left": int(game_window_rect[0]), "top": int(game_window_rect[1]), "width": int(game_window_rect[2]), "height": int(game_window_rect[3])})
 
         if img is None:
             continue
@@ -46,7 +48,7 @@ def grab_process(q):
 
 
 def cv2_process(q):
-    global _aim, _shoot, _ret, _pause, _shoot_interval, _show_cv2
+    global _aim, _shoot, _ret, _pause, _shoot_interval, _show_cv2, game_window_rect, _activation_time
 
     fps = FPS()
     font = cv2.FONT_HERSHEY_SIMPLEX
@@ -54,8 +56,6 @@ def cv2_process(q):
     grabber = Grabber()
 
     mouse = MouseControls()
-    game_window_rect = WinHelper.GetWindowRect("aimlab_tb")
-    cursor_pos = mouse.get_position()
 
     fov = [106.26, 73.74]  # horizontal, vertical
 
@@ -67,9 +67,9 @@ def cv2_process(q):
     # 360 grads = 16,400 # 16364
 
     def check_dot(hue_point):
-        dot_img = grabber.get_image({"left": int(game_window_rect[0] + game_window_rect__center[0] + 5),
+        dot_img = grabber.get_image({"left": int(game_window_rect[0] + (game_window_rect[2]/2) + 5),
                                      "top": int(
-                                         game_window_rect[1] + game_window_rect__center[1] + 28),
+                                         game_window_rect[1] + (game_window_rect[3]/2) + 28),
                                      "width": 6,
                                      "height": 6})
         dot_img = cv2.cvtColor(dot_img, cv2.COLOR_BGR2HSV)
@@ -175,6 +175,14 @@ def cv2_process(q):
 
                                 _last_shoot = time.perf_counter()
                                 break
+                        else:
+                            # Aim only once if shoot is disabled
+                            _aim = False
+
+                    # Auto deactivate aiming and/or shooting after N seconds
+                    if AUTO_DEACTIVATE_AFTER is not None:
+                        if _activation_time+AUTO_DEACTIVATE_AFTER < time.perf_counter():
+                            _aim = False
 
             # cv stuff
             # img = mask
@@ -189,11 +197,13 @@ def cv2_process(q):
 
 
 def switch_shoot_state(triggered, hotkey):
-    global _aim, _ret
+    global _aim, _ret, _activation_time
     _aim = not _aim  # inverse value
 
-    if not _aim_n_shoot:
+    if not _aim:
         _ret = None
+    else:
+        _activation_time = time.perf_counter()
 
 
 keyboard.add_hotkey(ACTIVATION_HOTKEY, switch_shoot_state, args=('triggered', 'hotkey'))
