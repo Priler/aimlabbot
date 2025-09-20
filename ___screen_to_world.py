@@ -1,4 +1,4 @@
-from math import atan, degrees, sqrt
+from math import atan, degrees, radians, tan
 from utils.cv2 import point_get_difference
 
 
@@ -46,7 +46,72 @@ def y_get_ratio(angle):
         return 0.021
 
 
-def get_move_angle__new(aim_target, gwr, pixels_per_degree, fov, _r=False):
+def get_angles(aim_target, window_size, fov):
+    """
+    Get (x, y) angles from center of image to aim_target.
+
+    Args:
+        aim_target: pair of numbers (x, y) where to aim
+        window_size: size of area (x, y)
+        fov: field of view in degrees, (horizontal, vertical)
+
+    Returns:
+       Pair of floating point angles (x, y) in degrees
+    """
+    fov = (radians(fov[0]), radians(fov[1]))
+
+    x_pos = aim_target[0] / (window_size[0] - 1)
+    y_pos = aim_target[1] / (window_size[1] - 1)
+
+    x_angle = atan((x_pos - 0.5) * 2 * tan(fov[0] / 2))
+    y_angle = atan((y_pos - 0.5) * 2 * tan(fov[1] / 2))
+
+    return degrees(x_angle), degrees(y_angle)
+
+
+def get_move_angle(aim_target, gwr, pixels_per_degree, fov):
+    angles = get_angles(aim_target, (gwr[2], gwr[3]), fov)
+
+    return list(angles)
+
+
+def get_move_angle__new3(aim_target, gwr, pixels_per_degree, fov):
+    # print(aim_target, gwr, pixels_per_degree, fov)
+    # angle is the angle in radians that the camera needs to
+    # rotate to aim at the point
+
+    # px is the point x position on the screen, normalised by
+    # the resolution (so 0.0 for the left-most pixel, 0.5 for
+    # the centre and 1.0 for the right-most
+
+    # FOV is the field of view in the x dimension in radians
+    game_window_rect__center = (gwr[2] / 2, gwr[3] / 2)
+    rel_diff = list(point_get_difference(game_window_rect__center, aim_target))
+
+    #x_degs = degrees(atan(rel_diff[0] / game_window_rect__center[0] * tan(radians(fov[0] / 2))))
+    #y_degs = degrees(atan(rel_diff[1] / game_window_rect__center[1] * tan(radians(fov[1] / 2))))
+
+    x__normalized = rel_diff[0] / (gwr[2]-1)
+    x_angle = degrees(atan(x__normalized * 2 * tan(radians(fov[0]) / 2)))
+
+    y__normalized = rel_diff[1] / (gwr[3]-1)
+    y_angle = degrees(atan(y__normalized * 2 * tan(radians(fov[1]) / 2)))
+
+    #print("REL DIFF", rel_diff)
+    #print("X NORMALIZED", x__normalized)
+    #print("ANGLES IS", (x_angle, y_angle))
+
+    rel_diff[0] = x_angle
+    rel_diff[1] = y_angle
+    return rel_diff
+
+
+# print(get_angles((321, 378), (1920, 1080), (106.26, 73.74)), "should be around [-41.88894918065101, -8.580429158509922]")
+# print(get_move_angle__new3((321, 378), (0, 0, 1920, 1080), 0, (106.26, 73.74)), "should be around [-41.88894918065101, -8.580429158509922]")
+# exit(1)
+
+
+def get_move_angle__new(aim_target, gwr, pixels_per_degree, fov):
     game_window_rect__center = (gwr[2]/2, gwr[3]/2)
     rel_diff = list(point_get_difference(game_window_rect__center, aim_target))
 
@@ -57,6 +122,9 @@ def get_move_angle__new(aim_target, gwr, pixels_per_degree, fov, _r=False):
 
     return rel_diff, (x_degs+y_degs)
 
+# get_move_angle__new((900, 540), (0, 0, 1920, 1080), 16364/360, (106.26, 73.74))
+# Output will be: ([-191.93420990140876, 0.0], -4.222458785413539)
+# But it's not accurate, overall x_degs must be more or less than -4.22...
 
 def get_move_angle(aim_target, gwr, pixels_per_degree, fov):
     game_window_rect__center = (gwr[2]/2, gwr[3]/2)

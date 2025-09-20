@@ -89,3 +89,30 @@ def point_get_difference(source_point, dest_point):
     y = dest_point[1]-source_point[1]
 
     return x, y
+
+
+def round_to_multiple(number, multiple) -> int:
+    """
+    Rounds number to the nearest multiple (2, 5, 10, etc.).
+    In example, to get width/height multiple of 32, required by Yolov, Tensorflow, etc.
+    :param number: Input number.
+    :param multiple: Required multiple.
+    :return: Nearest multiple.
+    """
+    return multiple * round(number / multiple)
+
+
+def resize_image_to_fit_multiply_of_32(game_window_rect):
+    # assure that width and height of capture area is multiple of 32
+    if int(game_window_rect[2]) % 32 != 0 or int(game_window_rect[3]) % 32 != 0:
+        # print("Width and/or Height of capture area must be multiple of 32")
+        # print("Width is", int(game_window_rect[2]), ", closest multiple of 32 is",
+        #       round_to_multiple(int(game_window_rect[2]), 32))
+        # print("Height is", int(game_window_rect[3]), ", closest multiple of 32 is",
+        #       round_to_multiple(int(game_window_rect[3]), 32))
+
+        game_window_rect[2] = round_to_multiple(int(game_window_rect[2]), 32)
+        game_window_rect[3] = round_to_multiple(int(game_window_rect[3]), 32)
+        # print("Width & Height was updated accordingly")
+
+    return game_window_rect
