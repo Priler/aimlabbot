@@ -9,6 +9,7 @@ class Grabber:
 
     def obs_vc_init(self, capture_device = 0):
         self.device = cv2.VideoCapture(capture_device)
+        self.device.set(cv2.CAP_PROP_BUFFERSIZE, 0)
 
     def set_cap_size(self, w, h):
         # h = 360
