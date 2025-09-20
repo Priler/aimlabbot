@@ -2,7 +2,7 @@
 Aim Lab computer vision bot made as an experiment (using OpenCV masks).
 
 # Preview
-[graphics]([https://i.imgur.com/WdVVZEt.png](https://i.ibb.co/k6cXs6fH/Photos-g-Sg-PYc-XGBu.png))
+![preview]([http://url/to/img.png](https://i.imgur.com/WdVVZEt.png](https://i.ibb.co/k6cXs6fH/Photos-g-Sg-PYc-XGBu.png))
 
 # How to use
 In Aimlab set CS:GO preset and sensitivity to 5.<br>
