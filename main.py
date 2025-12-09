@@ -240,7 +240,7 @@ def cv2_process():
         rectangles = filter_rectangles(rectangles.tolist())
         # Exclude rectangles that are near the center of the screen (the ones we're currently aiming at)
         center = [960, 540]
-        distance_threshold = 100  # You can adjust this value
+        distance_threshold = 200  # You can adjust this value
         exclude_threshold = 73    # Exclude targets within this distance from center
 
         filtered_rects = []
@@ -291,15 +291,14 @@ def cv2_process():
             if _show_cv2:
                 cv2.rectangle(img, (x, y), (x + w, y + h), [0, 255, 0], 2)
 
+        # prepare coords
+        mid_x = int((x+(x+w))/2)
+        mid_y = int((y+(y+h))/2)
+
+        cv2.circle(img, (mid_x, mid_y), 10, (0, 0, 255), -1)
 
         # AIM (if set)
         if _aim:
-            # prepare coords
-            mid_x = int((x+(x+w))/2)
-            mid_y = int((y+(y+h))/2)
-            #if _show_cv2:
-            #    cv2.circle(img, (mid_x, mid_y), 10, (0, 0, 255), -1)
-
             dx, dy = pixels_to_counts_enhanced(
                 target_xy=(mid_x, mid_y),
                 win_wh=(game_window_rect[2], game_window_rect[3]), 
@@ -330,7 +329,7 @@ def cv2_process():
 
             _ret = rel_diff
 
-            print(_target_shoot)
+            # SINGLE SHOT MOUSE MOVEMENT
             mouse.move_relative(rel_diff[0], rel_diff[1])
             sleep(_pause)
 
