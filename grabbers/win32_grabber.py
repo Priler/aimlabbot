@@ -1,11 +1,20 @@
-import win32gui, win32ui, win32con, win32api
-import numpy
+from typing import Dict, Optional, Tuple
+
+import numpy as np
+
+from .base import BaseGrabber
 
 
-class Grabber:
-    type = "win32"
-    @staticmethod
-    def __win32_grab(region=None):
+class Win32Grabber(BaseGrabber):
+
+    _type = "win32"
+
+    def _capture(self, region: Optional[Tuple[int, int, int, int]] = None) -> np.ndarray:
+        import win32gui
+        import win32ui
+        import win32con
+        import win32api
+
         hwin = win32gui.GetDesktopWindow()
 
         if region:
@@ -26,25 +35,22 @@ class Grabber:
         memdc.SelectObject(bmp)
         memdc.BitBlt((0, 0), (width, height), srcdc, (left, top), win32con.SRCCOPY)
 
-        signedIntsArray = bmp.GetBitmapBits(True)
-        img = numpy.fromstring(signedIntsArray, dtype='uint8')
-        img.shape = (height, width, 3)  # height, width, channels
+        signed_ints_array = bmp.GetBitmapBits(True)
+        img = np.frombuffer(signed_ints_array, dtype=np.uint8)
+        img.shape = (height, width, 4)
 
         srcdc.DeleteDC()
         memdc.DeleteDC()
         win32gui.ReleaseDC(hwin, hwindc)
         win32gui.DeleteObject(bmp.GetHandle())
 
-        return img
+        return img[:, :, :3]
 
-    def get_image(self, grab_area):
-        """
-        Make a screenshot of a given area and return it.
-        :param grab_area: Format is {"top": 40, "left": 0, "width": 800, "height": 640}
-        :return: numpy array
-        """
-        # noinspection PyTypeChecker
-        return self.__win32_grab((
-                grab_area['left'], grab_area['top'],
-                grab_area['width'] + grab_area['left'], grab_area['height'] + grab_area['top']
-            ))
+    def get_image(self, grab_area: Dict[str, int]) -> Optional[np.ndarray]:
+        region = (
+            grab_area["left"],
+            grab_area["top"],
+            grab_area["left"] + grab_area["width"],
+            grab_area["top"] + grab_area["height"],
+        )
+        return self._capture(region)

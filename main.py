@@ -1,424 +1,345 @@
-import logging, os, math, sys
+import logging
+import math
+import time
 
-from utils.grabbers.mss import Grabber as MSSGrabber
-from utils.grabbers.obs_vc import Grabber
-from pygrabber.dshow_graph import FilterGraph
-from utils.fps import FPS
 import cv2
-import multiprocessing
-from queue import Empty
 import numpy as np
-from utils.nms import non_max_suppression_fast
-from utils.cv2 import filter_rectangles
-
-from utils.controls.mouse.win32 import MouseControls
-from utils.win32 import WinHelper
-from utils.cv2 import resize_image_to_fit_multiply_of_32
 import keyboard
 
-import time
-from utils.time import sleep
-# from screen_to_world import get_move_angle__new as get_move_angle
-# from ___screen_to_world import pixels_to_counts_single_shot
+from grabbers import get_grabber
+from controls.mouse import get_mouse_controls
+from utils.fps import FPSCounter
+from utils.nms import non_max_suppression
+from utils.cv import merge_overlapping_boxes
+from utils.timing import precise_sleep
+from utils.win32 import get_window_rect
+from config import CaptureRegion, adjust_region_to_multiple
+
 from screen_to_world import pixels_to_counts_simple, pixels_to_counts_enhanced
 
-#config
-ACTIVATION_HOTKEY = 58  # 58 = CAPS-LOCK
-AUTO_DEACTIVATE_AFTER = 60  # seconds or None (default Aim Lab map time is 60 seconds)
-_shoot = True
-_show_cv2 = True
-
-obs_vc_device_index = -1 # -1 to find by the given name
-obs_vc_device_name = "OBS Virtual Camera"
-
-# the bigger these values, the more accurate and fail-safe bot will behave
-_pause = 0.09
-_shoot_interval = 0.05  # seconds
-
-# used by the script
-game_window_rect = WinHelper.GetWindowRect("aimlab_tb", (8, 30, 16, 39))  # cut the borders
-game_window_rect = resize_image_to_fit_multiply_of_32(list(game_window_rect))
-_ret = None
-_aim = False
-_activation_time = 0
-_correction = [0, 0]
-_attempts = 0
-_ret_center = [0, 0]
-_target_shoot = False
-
-def init_grabber():
-    grabber = MSSGrabber()
-
-    if grabber.type == "obs_vc":
-        if obs_vc_device_index != -1:
-            # init device by given index
-            grabber.obs_vc_init(obs_vc_device_index)
-        else:
-            # init device by given name
-            graph = FilterGraph()
-
-            try:
-                device = grabber.obs_vc_init(graph.get_input_devices().index(obs_vc_device_name))
-            except ValueError as e:
-                logging.error(f'Could not find OBS VC device with name "{obs_vc_device_name}"')
-                logging.error(e)
-                os._exit(1)
-    
-    return grabber
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+logger = logging.getLogger(__name__)
 
 
+# Config
+WINDOW_TITLE = "aimlab_tb"
+ACTIVATION_HOTKEY = 58  # CAPS-LOCK
+AUTO_DEACTIVATE_AFTER = 60
+SHOOT_ENABLED = True
+SHOW_CV2 = True
 
-def check_dot(img, debug=False):
-    """
-    Check if the center of the image contains a blue dot (hue around 87)
-    
-    Args:
-        img: Image from cv2.VideoCapture (BGR format)
-        debug: If True, prints debug information
-    
-    Returns:
-        bool: True if blue dot is detected
-    """
+GRABBER_TYPE = "mss"
+OBS_DEVICE_INDEX = -1
+OBS_DEVICE_NAME = "OBS Virtual Camera"
+
+PAUSE_TIME = 0.09
+SHOOT_INTERVAL = 0.05
+
+# FOV settings
+HORIZONTAL_FOV = 106.26
+VERTICAL_FOV = 73.74
+X360_COUNTS = 2727
+COUNTS_PER_DEGREE = X360_COUNTS / 360.0
+
+# Detection settings
+HUE_POINT = 87
+SPHERE_COLOR_RANGE = ((HUE_POINT, 100, 100), (HUE_POINT + 20, 255, 255))
+MIN_TARGET_SIZE = (40, 40)
+MAX_TARGET_SIZE = (150, 150)
+
+# Runtime state
+aim_active = False
+activation_time = 0
+correction = [0.0, 0.0]
+last_movement = None
+
+
+def get_capture_region() -> CaptureRegion:
+    try:
+        rect = get_window_rect(WINDOW_TITLE, (8, 30, 16, 39))
+        region = CaptureRegion(
+            left=rect[0],
+            top=rect[1],
+            width=rect[2],
+            height=rect[3],
+        )
+    except Exception as e:
+        logger.warning(f"Could not find window '{WINDOW_TITLE}': {e}")
+        region = CaptureRegion(left=0, top=0, width=1920, height=1080)
+
+    return adjust_region_to_multiple(region, 32)
+
+
+def init_grabber(grabber_type: str):
+    if grabber_type == "obs_vc":
+        return get_grabber(
+            grabber_type,
+            device_index=OBS_DEVICE_INDEX,
+            device_name=OBS_DEVICE_NAME,
+        )
+    return get_grabber(grabber_type)
+
+
+def check_center_dot(img, crop_size: int = 5, threshold: float = 0.25) -> bool:
     if img is None or img.size == 0:
-        if debug:
-            print("Invalid or empty image")
         return False
-    
+
     h, w = img.shape[:2]
-    if debug:
-        print(f"Image dimensions: {w}x{h}")
-    
-    # Define crop size (6x6 pixel area)
-    crop_size = 5
+    center_x = w // 2
+    center_y = h // 2
 
-    # Calculate center dot coordinates with offset
-    # center_x = int(w / 2 + 5)  # Using w instead of img.shape[1] for clarity
-    # center_y = int(h / 2 + 28)  # Using h instead of img.shape[0] for clarity
-    center_x = int((w / 2))  # Using w instead of img.shape[1] for clarity
-    center_y = int((h / 2))  # Using h instead of img.shape[0] for clarity
-    
-    if debug:
-        print(f"Target center: ({center_x}, {center_y})")
-
-    # Ensure the crop area is within image bounds
-    x1 = max(0, min(center_x - crop_size//2, w - crop_size))
-    y1 = max(0, min(center_y - crop_size//2, h - crop_size))
+    x1 = max(0, min(center_x - crop_size // 2, w - crop_size))
+    y1 = max(0, min(center_y - crop_size // 2, h - crop_size))
     x2 = x1 + crop_size
     y2 = y1 + crop_size
-    
-    if debug:
-        print(f"Crop area: ({x1}, {y1}) to ({x2}, {y2})")
-    
-    # Crop the region of interest
-    dot_img = img[y1:y2, x1:x2]
-    
-    if dot_img.shape[0] == 0 or dot_img.shape[1] == 0:
-        if debug:
-            print("Cropped area is empty")
+
+    dot_region = img[y1:y2, x1:x2]
+    if dot_region.shape[0] == 0 or dot_region.shape[1] == 0:
         return False
 
-    # Convert cropped region to HSV
-    dot_img_hsv = cv2.cvtColor(dot_img, cv2.COLOR_BGR2HSV)
-    hue_point = 87
-    # Make the range wider and lower the saturation/value thresholds for more sensitivity
-    sphere_color = ((hue_point, 100, 100), (hue_point + 20, 255, 255))  # HSV
-    mask = cv2.inRange(dot_img_hsv, np.array(sphere_color[0], dtype=np.uint8),
-                            np.array(sphere_color[1], dtype=np.uint8))
+    hsv = cv2.cvtColor(dot_region, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(
+        hsv,
+        np.array(SPHERE_COLOR_RANGE[0], dtype=np.uint8),
+        np.array(SPHERE_COLOR_RANGE[1], dtype=np.uint8),
+    )
 
-    # Lower the required percentage for detection to increase sensitivity
-    print(np.count_nonzero(mask), " > ", (mask.size * 0.25))
-    return np.count_nonzero(mask) > (mask.size * 0.25)
+    return np.count_nonzero(mask) > (mask.size * threshold)
 
 
-def cv2_process():
-    global _aim, _shoot, _ret, _target_shoot, _pause, _shoot_interval, _show_cv2, game_window_rect, _activation_time, _correction, _attempts
+def detect_targets(img):
+    hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
+    mask = cv2.inRange(
+        hsv,
+        np.array(SPHERE_COLOR_RANGE[0], dtype=np.uint8),
+        np.array(SPHERE_COLOR_RANGE[1], dtype=np.uint8),
+    )
 
-    fps = FPS()
-    font = cv2.FONT_HERSHEY_SIMPLEX
-    _last_shoot = None
-    # grabber = init_grabber()
-    grabber = init_grabber()
+    contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+    rectangles = []
 
-    mouse = MouseControls()
-    # print(mouse.get_position())
+    for cnt in contours:
+        x, y, w, h = cv2.boundingRect(cnt)
+        if (MIN_TARGET_SIZE[0] <= w <= MAX_TARGET_SIZE[0] and
+                MIN_TARGET_SIZE[1] <= h <= MAX_TARGET_SIZE[1]):
+            rectangles.append((x, y, w, h))
 
-
-    fov = [106.26, 73.74]  # horizontal, vertical
-    HFOV, VFOV = fov
-
-    # x360 = 16364  # x value to rotate on 360 degrees
-    x360 = 2727  # x value to rotate on 360 degrees
-    counts_per_degree = x360 / 360.0
-
-    x360_x = 2727
-    x1_x = x360_x / 360.0
-
-    x1 = x360/360
-    x_full_hor = x1 * fov[0]
-
-    center_dot = {"x": int(game_window_rect[0] + (game_window_rect[2]/2)),
-                                     "y": int(
-                                         game_window_rect[1] + (game_window_rect[3]/2))}
-
-    # 2420 = 53.13 grads
-    # 360 grads = 16,400 # 16364
-
-    while True:
-        img = grabber.get_image({"left": int(game_window_rect[0]), "top": int(game_window_rect[1]), "width": int(game_window_rect[2]), "height": int(game_window_rect[3])})
-        if img is None:
-            break
-
-        # if _ret is not None:
-        #     # return the mouse to base position and proceed again
-        #     mouse.move_relative(int(_ret[0]), int(_ret[1]))
-        #     _ret = None
-        #     # sleep(_pause)
-        #     continue
-
-        # Try shoot if currently aiming at the target
-        _target_shoot = False
-        if _last_shoot is None or time.perf_counter() > (_last_shoot + _shoot_interval) and _shoot:
-            _attempts += 1
-
-            # detect if aiming the target (more accurate)
-            if check_dot(img):
-                _attempts = 0
-                _target_shoot = True
-
-                # click
-                mouse.hold_mouse()
-                sleep(0.001)
-                mouse.release_mouse()
-                sleep(0.001)
-
-                _last_shoot = time.perf_counter()
-                # done_sem.release()
-                # continue
-            else:
-                _target_shoot = False
+    return rectangles
 
 
-        # Mask and infere blue spheres
-        # OpenCV HSV Scale (H: 0-179, S: 0-255, V: 0-255)
-        hue_point = 87
-        sphere_color = ((hue_point, 100, 100), (hue_point + 20, 255, 255))  # HSV
-        min_target_size = (40, 40)
-        max_target_size = (150, 150)
+def select_best_target(rectangles, screen_center, exclude_threshold=73):
+    if not rectangles:
+        return None
 
-        hsv = cv2.cvtColor(img, cv2.COLOR_BGR2HSV)
-        mask = cv2.inRange(hsv, np.array(sphere_color[0], dtype=np.uint8),
-                            np.array(sphere_color[1], dtype=np.uint8))
+    candidates = []
+    for rect in rectangles:
+        x, y, w, h = rect
+        mid_x = x + w // 2
+        mid_y = y + h // 2
+        dist = math.dist(screen_center, (mid_x, mid_y))
 
-        contours, hierarchy = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-        rectangles = []
+        if dist > exclude_threshold:
+            candidates.append((rect, dist))
 
-        for cnt in contours:
-            x, y, w, h = cv2.boundingRect(cnt)
-            if (w >= min_target_size[0] and h >= min_target_size[1])\
-                    and (w <= max_target_size[0] and h <= max_target_size[1]):
-                rectangles.append((int(x), int(y), int(w), int(h)))
+    if not candidates:
+        candidates = [
+            (rect, math.dist(screen_center, (rect[0] + rect[2] // 2, rect[1] + rect[3] // 2)))
+            for rect in rectangles
+        ]
 
-        if not rectangles:
+    cluster_threshold = 200
+    clusters = []
+    used = set()
+
+    for i, (rect_i, dist_i) in enumerate(candidates):
+        if i in used:
             continue
 
-        if _show_cv2:
-            for rect in rectangles:
-                x, y, w, h = rect
-                cv2.rectangle(img, (x, y), (x + w, y + h), [255, 0, 0], 6)
-                img = cv2.putText(img, f"{(x + w, y + h)}", (x, y-10), font,
-                                    .5, (0, 255, 0), 1, cv2.LINE_AA)
+        cluster = [(rect_i, dist_i)]
+        used.add(i)
+        mid_i = (rect_i[0] + rect_i[2] // 2, rect_i[1] + rect_i[3] // 2)
+
+        for j, (rect_j, dist_j) in enumerate(candidates):
+            if j in used:
+                continue
+
+            mid_j = (rect_j[0] + rect_j[2] // 2, rect_j[1] + rect_j[3] // 2)
+            if math.dist(mid_i, mid_j) < cluster_threshold:
+                cluster.append((rect_j, dist_j))
+                used.add(j)
+
+        if len(cluster) > 1:
+            clusters.append(cluster)
+
+    if clusters:
+        best_cluster = min(clusters, key=lambda cl: min(r[1] for r in cl))
+        return min(best_cluster, key=lambda r: r[1])[0]
+
+    return min(candidates, key=lambda r: r[1])[0]
 
 
-        # max targets count is 1, everything else is considered FP
-        rectangles = rectangles
+def main_loop():
+    global aim_active, activation_time, correction, last_movement
+
+    region = get_capture_region()
+    grabber = init_grabber(GRABBER_TYPE)
+    mouse = get_mouse_controls("win32")
+    fps = FPSCounter()
+    font = cv2.FONT_HERSHEY_SIMPLEX
+
+    screen_center = (region.width // 2, region.height // 2)
+    grab_area = region.to_dict()
+
+    last_shoot_time = None
+
+    logger.info(f"Starting capture: {region.width}x{region.height}")
+    logger.info(f"Press CAPS-LOCK to toggle aiming")
+
+    while True:
+        img = grabber.get_image(grab_area)
+        if img is None:
+            continue
+
+        # Shooting logic
+        if SHOOT_ENABLED and aim_active:
+            can_shoot = (last_shoot_time is None or
+                         time.perf_counter() > last_shoot_time + SHOOT_INTERVAL)
+
+            if can_shoot and check_center_dot(img):
+                mouse.press("left")
+                precise_sleep(0.001)
+                mouse.release("left")
+                last_shoot_time = time.perf_counter()
+
+        # Target detection
+        rectangles = detect_targets(img)
+        if not rectangles:
+            if SHOW_CV2:
+                current_fps = fps()
+                cv2.putText(img, f"{current_fps:.1f} | targets = 0", (20, 120),
+                            font, 1.7, (0, 255, 0), 7, cv2.LINE_AA)
+                cv2.imshow("AimBot", cv2.resize(img, (1280, 720)))
+                cv2.waitKey(1)
+            continue
+
         targets_count = len(rectangles)
 
         # Apply NMS
-        rectangles = np.array(non_max_suppression_fast(np.array(rectangles), overlapThresh=0.3))
+        if len(rectangles) > 1:
+            boxes = np.array([(x, y, x + w, y + h) for x, y, w, h in rectangles])
+            nms_boxes = non_max_suppression(boxes, overlap_thresh=0.3)
+            rectangles = [(b[0], b[1], b[2] - b[0], b[3] - b[1]) for b in nms_boxes]
 
-        # Filter rectangles (join intersections)
-        rectangles = filter_rectangles(rectangles.tolist())
-        # Exclude rectangles that are near the center of the screen (the ones we're currently aiming at)
-        center = [960, 540]
-        distance_threshold = 200  # You can adjust this value
-        exclude_threshold = 73    # Exclude targets within this distance from center
+        # Merge overlapping
+        rectangles = merge_overlapping_boxes(rectangles)
 
-        filtered_rects = []
-        for rect in rectangles:
-            x, y, w, h = rect
-            mid_x = int((x + (x + w)) / 2)
-            mid_y = int((y + (y + h)) / 2)
-            dist = math.dist(center, [mid_x, mid_y])
-            if dist > exclude_threshold:
-                filtered_rects.append((rect, dist))
+        # Select best target
+        target = select_best_target(rectangles, screen_center)
+        if target is None:
+            continue
 
-        if not filtered_rects:
-            # If all targets are too close to center, fallback to original rectangles
-            filtered_rects = [(rect, math.dist(center, [int((rect[0] + (rect[0] + rect[2])) / 2), int((rect[1] + (rect[1] + rect[3])) / 2)])) for rect in rectangles]
+        x, y, w, h = target
+        mid_x = x + w // 2
+        mid_y = y + h // 2
 
-        # prioritize multiple closest targets that are close to each other over a single closest
-        # Find clusters of targets that are close to each other
-        cluster_threshold = distance_threshold  # distance between targets to be considered a cluster
-        clusters = []
-        used = set()
-        for i, (rect_i, dist_i) in enumerate(filtered_rects):
-            cluster = [filtered_rects[i]]
-            used.add(i)
-            mid_i = [int((rect_i[0] + (rect_i[0] + rect_i[2])) / 2), int((rect_i[1] + (rect_i[1] + rect_i[3])) / 2)]
-            for j, (rect_j, dist_j) in enumerate(filtered_rects):
-                if i == j or j in used:
-                    continue
-                mid_j = [int((rect_j[0] + (rect_j[0] + rect_j[2])) / 2), int((rect_j[1] + (rect_j[1] + rect_j[3])) / 2)]
-                if math.dist(mid_i, mid_j) < cluster_threshold:
-                    cluster.append(filtered_rects[j])
-                    used.add(j)
-            if len(cluster) > 1:
-                clusters.append(cluster)
+        # Draw debug info
+        if SHOW_CV2:
+            for rect in rectangles:
+                rx, ry, rw, rh = rect
+                cv2.rectangle(img, (rx, ry), (rx + rw, ry + rh), (255, 0, 0), 2)
 
-        if clusters:
-            # If there are clusters, pick the cluster closest to center, then the closest target in that cluster
-            cluster = min(clusters, key=lambda cl: min(r[1] for r in cl))
-            aim_rect = min(cluster, key=lambda r: r[1])[0]
-        else:
-            # Fallback to single closest target
-            aim_rect = min(filtered_rects, key=lambda r: r[1])[0]
+            cv2.rectangle(img, (x, y), (x + w, y + h), (0, 255, 0), 3)
+            cv2.circle(img, (mid_x, mid_y), 10, (0, 0, 255), -1)
 
-
-        # show bounding boxes
-        rectangles = [aim_rect]
-        for rect in rectangles:
-            x, y, w, h = rect
-            if _show_cv2:
-                cv2.rectangle(img, (x, y), (x + w, y + h), [0, 255, 0], 2)
-
-        # prepare coords
-        mid_x = int((x+(x+w))/2)
-        mid_y = int((y+(y+h))/2)
-
-        cv2.circle(img, (mid_x, mid_y), 10, (0, 0, 255), -1)
-
-        # AIM (if set)
-        if _aim:
+        # Aim movement
+        if aim_active:
             dx, dy = pixels_to_counts_enhanced(
                 target_xy=(mid_x, mid_y),
-                win_wh=(game_window_rect[2], game_window_rect[3]), 
-                fov_deg_pair=(HFOV, VFOV),
-                counts_per_deg_x=x1_x
+                win_wh=(region.width, region.height),
+                fov_deg_pair=(HORIZONTAL_FOV, VERTICAL_FOV),
+                counts_per_deg_x=COUNTS_PER_DEGREE,
             )
 
-            xdiff = abs(mid_x - center_dot["x"])
-            ydiff = abs(mid_y - center_dot["y"])
+            # Distance-based boost
+            x_diff = abs(mid_x - screen_center[0])
+            y_diff = abs(mid_y - screen_center[1])
 
-            if xdiff > (center_dot["x"]/4):
+            if x_diff > screen_center[0] / 4:
                 dx = int(dx * 1.05)
-            if xdiff > (center_dot["x"]/3):
+            if x_diff > screen_center[0] / 3:
                 dx = int(dx * 1.05)
 
-            if ydiff > (center_dot["y"]/4):
+            if y_diff > screen_center[1] / 4:
                 dy = int(dy * 1.05)
-            if ydiff > (center_dot["y"]/2):
+            if y_diff > screen_center[1] / 2:
                 dy = int(dy * 1.05)
 
-            # if dx > 200:
-            #     dx = 200
+            last_movement = (dx, dy)
+            mouse.move_relative(dx, dy)
+            precise_sleep(PAUSE_TIME)
 
-            # if dy > 100:
-            #     dy = 100
-
-            rel_diff = [dx, dy]
-
-            _ret = rel_diff
-
-            # SINGLE SHOT MOUSE MOVEMENT
-            mouse.move_relative(rel_diff[0], rel_diff[1])
-            sleep(_pause)
-
-            # click
-            # sleep(0.001)
-            # mouse.hold_mouse()
-            # sleep(0.001)
-            # mouse.release_mouse()
-            # sleep(0.001)
-
-            # sleep(_pause)
-            # _aim = False
-
-        # # Auto deactivate aiming and/or shooting after N seconds
-        # if AUTO_DEACTIVATE_AFTER is not None:
-        #     if _activation_time+AUTO_DEACTIVATE_AFTER < time.perf_counter():
-        #         _aim = False
-
-        # cv stuff
-        # img = mask
-        if not 'targets_count' in locals():
-            targets_count = 0
-        if _show_cv2:
-            img = cv2.putText(img, f"{fps():.2f} | targets = {targets_count}", (20, 120), font,
-                                1.7, (0, 255, 0), 7, cv2.LINE_AA)
-            img = cv2.resize(img, (1280, 720))
-            # cv2.imshow("test", cv2.cvtColor(img, cv2.COLOR_RGB2BGRA))
-            # mask = cv2.resize(mask, (1280, 720))
-            cv2.imshow("test", img)
+        # Display
+        if SHOW_CV2:
+            current_fps = fps()
+            status = "AIM ON" if aim_active else "AIM OFF"
+            cv2.putText(img, f"{current_fps:.1f} | {status} | targets = {targets_count}",
+                        (20, 120), font, 1.5, (0, 255, 0), 5, cv2.LINE_AA)
+            cv2.imshow("AimBot", cv2.resize(img, (1280, 720)))
             cv2.waitKey(1)
 
 
-def switch_shoot_state(triggered, hotkey):
-    global _aim, _activation_time
-    _aim = not _aim  # inverse value
-
-    if not _aim:
-        _ret = None
+def toggle_aim(*args):
+    global aim_active, activation_time
+    aim_active = not aim_active
+    if aim_active:
+        activation_time = time.perf_counter()
+        logger.info("Aim ACTIVATED")
     else:
-        _activation_time = time.perf_counter()
+        logger.info("Aim DEACTIVATED")
 
 
-keyboard.add_hotkey(ACTIVATION_HOTKEY, switch_shoot_state, args=('triggered', 'hotkey'))
-
-def perform_180(triggered, hotkey):
-    global _ret
-    # x360 = 16364  # x value to rotate on 360 degrees
-    x360 = 2727  # x value to rotate on 360 degrees
-    x1 = x360/360 # 180
-
-    print(f"PERFORMING 180: x by {-int(x360 + _correction[0])} with correction set to {_correction[0]}")
-
-    mouse = MouseControls()
-    mouse.move_relative(-int((x1 * 180) + _correction[0]), 0)
-
-keyboard.add_hotkey("shift+q", perform_180, args=('triggered', 'hotkey'))
-
-def return_crosshair(triggered, hotkey):
-    global _ret
-    x360 = 2727  # x value to rotate on 360 degrees
-    x1 = x360/360
-
-    if _ret is not None:
-        mouse = MouseControls()
-        # return the mouse to base position and proceed again
-        mouse.move_relative(-int(x1 * _ret[0]), -int(x1 * _ret[1]))
-        _ret = None
-        # sleep(_pause)
-
-keyboard.add_hotkey("shift+b", return_crosshair, args=('triggered', 'hotkey'))
+def perform_180(*args):
+    mouse = get_mouse_controls("win32")
+    turn_counts = int(COUNTS_PER_DEGREE * 180 + correction[0])
+    mouse.move_relative(-turn_counts, 0)
+    logger.info(f"180 turn: {-turn_counts} counts")
 
 
-def x_correct_angles(triggered, hotkey):
-    global _correction
+def return_crosshair(*args):
+    global last_movement
+    if last_movement is not None:
+        mouse = get_mouse_controls("win32")
+        mouse.move_relative(-last_movement[0], -last_movement[1])
+        last_movement = None
+        logger.info("Crosshair returned")
 
-    _correction[0] += 0.1
 
-    print("CORRECTION X", _correction)
-keyboard.add_hotkey("shift+x", x_correct_angles, args=('triggered', 'hotkey'))
+def adjust_correction_x(*args):
+    global correction
+    correction[0] += 0.1
+    logger.info(f"X correction: {correction[0]:.1f}")
 
 
-def y_correct_angles(triggered, hotkey):
-    global _correction
+def adjust_correction_y(*args):
+    global correction
+    correction[1] += 0.1
+    logger.info(f"Y correction: {correction[1]:.1f}")
 
-    _correction[1] += 0.1
 
-    print("CORRECTION Y", _correction)
-keyboard.add_hotkey("shift+y", y_correct_angles, args=('triggered', 'hotkey'))
+keyboard.add_hotkey(ACTIVATION_HOTKEY, toggle_aim)
+keyboard.add_hotkey("shift+q", perform_180)
+keyboard.add_hotkey("shift+b", return_crosshair)
+keyboard.add_hotkey("shift+x", adjust_correction_x)
+keyboard.add_hotkey("shift+y", adjust_correction_y)
 
 
 if __name__ == "__main__":
-    cv2_process()
+    try:
+        main_loop()
+    except KeyboardInterrupt:
+        logger.info("Shutting down...")
+    finally:
+        cv2.destroyAllWindows()
